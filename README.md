@@ -2,24 +2,44 @@
 
 # Alert Worker
 
-This node receives parsed alert payloads from the listener and runs:
+This service receives parsed alerts from the listener and runs:
 
-- alert creation
-- alert persistence
-- alert websocket/api
+- alert creation and deduplication
+- alert persistence in PostgreSQL
+- alert websocket/API for the frontend
+- screenshot and camera-video command callbacks back through the listener
 
-Deploy steps:
+Recommended deployment on your frontend droplet:
 
-1. Copy repo to alert worker server
-2. Configure `.env`
-3. Build:
+- frontend: port `3000`
+- alert worker API: port `3100`
+- PostgreSQL: local on `127.0.0.1:5432`
+
+Quick start:
 
 ```bash
+cp .env.example .env
+npm install
 npm run build
+pm2 start ecosystem.config.js --update-env
 ```
 
-4. Start with PM2:
+One-shot droplet bootstrap:
 
 ```bash
-pm2 start ecosystem.config.js --update-env
+curl -fsSL https://raw.githubusercontent.com/TakundaMabukwa/video-alerts/main/bootstrap-droplet.sh -o bootstrap-droplet.sh
+chmod +x bootstrap-droplet.sh
+sudo ./bootstrap-droplet.sh
+```
+
+After bootstrap:
+
+- edit `/opt/video-alerts/.env` if needed
+- confirm the DB password in `.env` matches what the bootstrap created
+- restart PM2
+
+Health check:
+
+```bash
+curl http://127.0.0.1:3100/health
 ```

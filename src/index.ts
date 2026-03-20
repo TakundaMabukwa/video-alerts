@@ -146,21 +146,34 @@ const API_PORT = parseInt(process.env.API_PORT || '3000');
 const SERVER_IP = process.env.SERVER_IP || 'localhost';
 const AUTO_SCREENSHOT_INTERVAL_MS = parseInt(process.env.AUTO_SCREENSHOT_INTERVAL_MS || '30000');
 const AUTO_SCREENSHOT_FALLBACK_DELAY_MS = parseInt(process.env.AUTO_SCREENSHOT_FALLBACK_DELAY_MS || '600');
-const BACKGROUND_STREAMS_ENABLED = envFlag('BACKGROUND_STREAMS_ENABLED', true);
+const INGRESS_ENABLED = envFlag('INGRESS_ENABLED', true);
+const ALERT_PROCESSING_ENABLED = envFlag('ALERT_PROCESSING_ENABLED', true);
+const VIDEO_PROCESSING_ENABLED = envFlag('VIDEO_PROCESSING_ENABLED', true);
+const DB_ENABLED = envFlag('DB_ENABLED', ALERT_PROCESSING_ENABLED);
+const SHOULD_USE_DB = DB_ENABLED;
+const BACKGROUND_STREAMS_ENABLED = envFlag('BACKGROUND_STREAMS_ENABLED', VIDEO_PROCESSING_ENABLED);
 const KEEP_STREAMS_WITHOUT_CLIENTS = envFlag(
   'KEEP_STREAMS_WITHOUT_CLIENTS',
   BACKGROUND_STREAMS_ENABLED
 );
 const AUTO_SCREENSHOT_FANOUT_ENABLED = envFlag('AUTO_SCREENSHOT_FANOUT_ENABLED', false);
 const BACKGROUND_STREAM_INTERVAL_MS = parseInt(process.env.BACKGROUND_STREAM_INTERVAL_MS || '45000');
-const INGRESS_ENABLED = envFlag('INGRESS_ENABLED', true);
-const ALERT_PROCESSING_ENABLED = envFlag('ALERT_PROCESSING_ENABLED', true);
-const VIDEO_PROCESSING_ENABLED = envFlag('VIDEO_PROCESSING_ENABLED', true);
-const SHOULD_USE_DB = ALERT_PROCESSING_ENABLED || VIDEO_PROCESSING_ENABLED;
 const ALERT_WORKER_URL = process.env.ALERT_WORKER_URL || '';
 const VIDEO_WORKER_URL = process.env.VIDEO_WORKER_URL || '';
 const LISTENER_SERVER_URL = process.env.LISTENER_SERVER_URL || '';
 const INTERNAL_WORKER_TOKEN = process.env.INTERNAL_WORKER_TOKEN || '';
+const MESSAGE_TRACE_ENABLED = envFlag(
+  'MESSAGE_TRACE_ENABLED',
+  INGRESS_ENABLED && (ALERT_PROCESSING_ENABLED || VIDEO_PROCESSING_ENABLED)
+);
+const DATA_WS_ENABLED = envFlag(
+  'DATA_WS_ENABLED',
+  MESSAGE_TRACE_ENABLED
+);
+const PROTOCOL_WS_ENABLED = envFlag(
+  'PROTOCOL_WS_ENABLED',
+  MESSAGE_TRACE_ENABLED
+);
 
 async function startServer() {
   console.log('Starting JT/T 1078 Video Ingestion Server...');
@@ -225,40 +238,42 @@ async function startServer() {
   app.use('/hls', express.static('hls'));
   
   const httpServer = createServer(app);
-  const dataWsServer = new DataWebSocketServer('/ws/data');
-  const protocolWsServer = new ProtocolWebSocketServer([
-    '0x0001',
-    '0x8001',
-    '0x0002',
-    '0x0100',
-    '0x8100',
-    '0x0102',
-    '0x8103',
-    '0x8104',
-    '0x8106',
-    '0x0200',
-    '0x0201',
-    '0x0704',
-    '0x0301',
-    '0x0302',
-    '0x0700',
-    '0x0702',
-    '0x0800',
-    '0x0801',
-    '0x0802',
-    '0x0900',
-    '0x1001',
-    '0x1003',
-    '0x1205',
-    '0x9205',
-    '0x9101',
-    '0x9102',
-    '0x9103',
-    '0x9105',
-    '0x9106',
-    '0x9201',
-    '0x9301'
-  ], '/ws/protocol');
+  const dataWsServer = INGRESS_ENABLED && DATA_WS_ENABLED ? new DataWebSocketServer('/ws/data') : null;
+  const protocolWsServer = INGRESS_ENABLED && PROTOCOL_WS_ENABLED
+    ? new ProtocolWebSocketServer([
+        '0x0001',
+        '0x8001',
+        '0x0002',
+        '0x0100',
+        '0x8100',
+        '0x0102',
+        '0x8103',
+        '0x8104',
+        '0x8106',
+        '0x0200',
+        '0x0201',
+        '0x0704',
+        '0x0301',
+        '0x0302',
+        '0x0700',
+        '0x0702',
+        '0x0800',
+        '0x0801',
+        '0x0802',
+        '0x0900',
+        '0x1001',
+        '0x1003',
+        '0x1205',
+        '0x9205',
+        '0x9101',
+        '0x9102',
+        '0x9103',
+        '0x9105',
+        '0x9106',
+        '0x9201',
+        '0x9301'
+      ], '/ws/protocol')
+    : null;
   const liveVideoServer = new LiveVideoStreamServer(tcpServer, '/ws/video');
   const sseVideoStream = new SSEVideoStream(tcpServer);
   const replayService = new ReplayService(liveVideoServer);
@@ -291,19 +306,21 @@ async function startServer() {
     });
   }
 
-  tcpServer.setMessageTraceCallback((trace) => {
-    dataWsServer.broadcast({
-      type: 'PROTOCOL_MESSAGE',
-      trace
+  if (MESSAGE_TRACE_ENABLED && dataWsServer && protocolWsServer) {
+    tcpServer.setMessageTraceCallback((trace) => {
+      dataWsServer.broadcast({
+        type: 'PROTOCOL_MESSAGE',
+        trace
+      });
+      protocolWsServer.broadcastTrace(trace);
     });
-    protocolWsServer.broadcastTrace(trace);
-  });
+  }
   
   if (INGRESS_ENABLED) {
     await tcpServer.start();
     await udpServer.start();
   }
-  if (VIDEO_PROCESSING_ENABLED) {
+  if (VIDEO_PROCESSING_ENABLED && SHOULD_USE_DB) {
     retentionService.start();
   }
 
@@ -407,7 +424,7 @@ async function startServer() {
     })));
   });
   
-  const wsServer = new AlertWebSocketServer(alertManager, '/ws/alerts');
+  const wsServer = ALERT_PROCESSING_ENABLED ? new AlertWebSocketServer(alertManager, '/ws/alerts') : null;
 
   // Single upgrade router for all websocket paths.
   httpServer.on('upgrade', (request, socket, head) => {
@@ -421,15 +438,15 @@ async function startServer() {
       return;
     }
 
-    if (pathname === wsServer.getPath()) {
+    if (wsServer && pathname === wsServer.getPath()) {
       wsServer.handleUpgrade(request, socket, head);
       return;
     }
-    if (pathname === dataWsServer.getPath()) {
+    if (dataWsServer && pathname === dataWsServer.getPath()) {
       dataWsServer.handleUpgrade(request, socket, head);
       return;
     }
-    if (protocolWsServer.handleUpgrade(request, socket, head, pathname)) {
+    if (protocolWsServer && protocolWsServer.handleUpgrade(request, socket, head, pathname)) {
       return;
     }
     if (pathname === liveVideoServer.getPath()) {
@@ -523,44 +540,59 @@ async function startServer() {
   }
   
   // Alert reminder scheduler - Check for unattended alerts every 5 minutes
-  setInterval(async () => {
-    try {
-      const { AlertStorageDB } = require('./storage/alertStorageDB');
-      const alertStorage = new AlertStorageDB();
-      const unattended = await alertStorage.getUnattendedAlerts(30);
-      
-      if (unattended.length > 0) {
-        console.log(`⏰ REMINDER: ${unattended.length} unattended alerts`);
-        wsServer.broadcast({
-          type: 'alert-reminder',
-          count: unattended.length,
-          alerts: unattended.map((a: any) => ({
-            id: a.id,
-            type: a.alert_type,
-            priority: a.priority,
-            timestamp: a.timestamp,
-            vehicleId: a.device_id
-          }))
-        });
+  if (ALERT_PROCESSING_ENABLED && SHOULD_USE_DB) {
+    setInterval(async () => {
+      try {
+        const { AlertStorageDB } = require('./storage/alertStorageDB');
+        const alertStorage = new AlertStorageDB();
+        const unattended = await alertStorage.getUnattendedAlerts(30);
+        
+        if (unattended.length > 0) {
+          console.log(`⏰ REMINDER: ${unattended.length} unattended alerts`);
+          wsServer?.broadcast({
+            type: 'alert-reminder',
+            count: unattended.length,
+            alerts: unattended.map((a: any) => ({
+              id: a.id,
+              type: a.alert_type,
+              priority: a.priority,
+              timestamp: a.timestamp,
+              vehicleId: a.device_id
+            }))
+          });
+        }
+      } catch (error) {
+        console.error('Alert reminder error:', error);
       }
-    } catch (error) {
-      console.error('Alert reminder error:', error);
-    }
-  }, 5 * 60 * 1000); // Every 5 minutes
+    }, 5 * 60 * 1000); // Every 5 minutes
+  }
   
   httpServer.listen(API_PORT, '0.0.0.0', () => {
     console.log(`REST API server listening on port ${API_PORT}`);
-    console.log(`WebSocket - Alerts: ws://localhost:${API_PORT}/ws/alerts`);
-    console.log(`WebSocket - Data: ws://localhost:${API_PORT}/ws/data`);
-    console.log(`WebSocket - Protocol All: ws://localhost:${API_PORT}/ws/protocol/all`);
-    console.log(`WebSocket - Protocol 0x1205: ws://localhost:${API_PORT}/ws/protocol/0x1205`);
-    console.log(`WebSocket - Live Video: ws://localhost:${API_PORT}/ws/video`);
+    if (ALERT_PROCESSING_ENABLED) {
+      console.log(`WebSocket - Alerts: ws://localhost:${API_PORT}/ws/alerts`);
+    }
+    if (INGRESS_ENABLED && DATA_WS_ENABLED) {
+      console.log(`WebSocket - Data: ws://localhost:${API_PORT}/ws/data`);
+    }
+    if (INGRESS_ENABLED && PROTOCOL_WS_ENABLED) {
+      console.log(`WebSocket - Protocol All: ws://localhost:${API_PORT}/ws/protocol/all`);
+      console.log(`WebSocket - Protocol 0x1205: ws://localhost:${API_PORT}/ws/protocol/0x1205`);
+    }
+    if (VIDEO_PROCESSING_ENABLED) {
+      console.log(`WebSocket - Live Video: ws://localhost:${API_PORT}/ws/video`);
+    }
   });
   
   console.log('\n=== JT/T 1078 Video Server Started ===');
-  console.log(`TCP: ${TCP_PORT} | UDP: ${UDP_PORT} | API: ${API_PORT}`);
-  console.log(`Live Stream: ws://localhost:${API_PORT}/ws/video`);
-  console.log(`SSE Test: http://localhost:${API_PORT}/api/stream/test`);
+  console.log(`API: ${API_PORT}`);
+  if (INGRESS_ENABLED) {
+    console.log(`TCP: ${TCP_PORT} | UDP: ${UDP_PORT}`);
+  }
+  if (VIDEO_PROCESSING_ENABLED) {
+    console.log(`Live Stream: ws://localhost:${API_PORT}/ws/video`);
+    console.log(`SSE Test: http://localhost:${API_PORT}/api/stream/test`);
+  }
   console.log('==========================================\n');
   
   // Graceful shutdown
