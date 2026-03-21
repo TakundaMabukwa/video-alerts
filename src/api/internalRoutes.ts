@@ -2,6 +2,7 @@ import express from 'express';
 import { AlertManager } from '../alerts/alertManager';
 import { TCPRTPHandler } from '../tcp/rtpHandler';
 import { JTT808Server } from '../tcp/server';
+import { DeviceStorage } from '../storage/deviceStorage';
 
 function authorized(req: express.Request): boolean {
   const expected = String(process.env.INTERNAL_WORKER_TOKEN || '').trim();
@@ -15,6 +16,7 @@ export function createInternalRoutes(
   tcpServer?: JTT808Server
 ): express.Router {
   const router = express.Router();
+  const deviceStorage = new DeviceStorage();
 
   router.use((req, res, next) => {
     if (!authorized(req)) {
@@ -55,8 +57,16 @@ export function createInternalRoutes(
         return res.status(400).json({ success: false, message: 'Missing external alert payload' });
       }
 
+      const vehicleId = String(input.vehicleId || '').trim();
+      if (!vehicleId) {
+        return res.status(400).json({ success: false, message: 'Missing vehicleId' });
+      }
+
+      await deviceStorage.upsertDevice(vehicleId, String(input?.metadata?.sourceIp || input?.metadata?.ipAddress || '0.0.0.0'));
+
       const normalized = {
         ...input,
+        vehicleId,
         timestamp: input.timestamp ? new Date(input.timestamp) : new Date()
       };
 
