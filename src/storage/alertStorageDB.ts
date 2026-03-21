@@ -109,6 +109,15 @@ export class AlertStorageDB {
   }
 
   async saveAlert(alert: AlertEvent) {
+    await query(
+      `INSERT INTO devices (device_id, ip_address, last_seen)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (device_id) DO UPDATE SET
+         last_seen = NOW(),
+         ip_address = COALESCE(devices.ip_address, EXCLUDED.ip_address)`,
+      [alert.vehicleId, null]
+    );
+
     // DEDUPLICATION: Check if similar alert exists within last 60 seconds
     // If yes, just increment counter (UPDATE = 50x faster than INSERT)
     // If no, insert as new alert
